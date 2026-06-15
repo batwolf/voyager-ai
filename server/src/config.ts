@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 
-export const PORT = Number(process.env.MC_PORT ?? 8787);
+export const PORT = Number(process.env.MC_PORT ?? 8990);
 
 /** Where claude writes per-project transcripts. */
 export const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
@@ -11,6 +11,9 @@ export const DATA_DIR = process.env.MC_DATA_DIR ?? path.join(os.homedir(), ".mc"
 export const SESSIONS_FILE = path.join(DATA_DIR, "sessions.json");
 export const PIPE_DIR = path.join(DATA_DIR, "pipes");
 export const WORKTREE_DIR = path.join(DATA_DIR, "worktrees");
+
+/** Dir holding the `open` shim that keeps auth URLs inside the web terminal. */
+export const SHIM_DIR = path.join(DATA_DIR, "shims");
 
 /** Path to the claude binary. Override with MC_CLAUDE_BIN if not on PATH. */
 export const CLAUDE_BIN = process.env.MC_CLAUDE_BIN ?? "claude";

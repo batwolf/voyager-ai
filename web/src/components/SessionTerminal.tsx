@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import type { MCSocket } from "../ws";
 
 export interface TerminalSink {
@@ -31,6 +32,13 @@ export function SessionTerminal({ id, socket, registerSink, unregisterSink }: Pr
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    // Make URLs (e.g. Claude's login/"get tokens" link) clickable, opening in a
+    // new tab so they never replace the terminal view.
+    term.loadAddon(
+      new WebLinksAddon((_event, uri) => {
+        window.open(uri, "_blank", "noopener,noreferrer");
+      })
+    );
     term.open(hostRef.current!);
 
     const dims = () => ({ cols: term.cols, rows: term.rows });

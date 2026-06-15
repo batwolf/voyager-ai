@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- Full-bleed background so the icon also works as a maskable PWA icon. -->
+  <rect width="512" height="512" fill="#0d1117"/>
+  <g transform="translate(256 256)">
+    <!-- Orbit -->
+    <ellipse cx="0" cy="0" rx="168" ry="104" fill="none" stroke="#58a6ff"
+             stroke-opacity="0.35" stroke-width="6" transform="rotate(-24)"/>
+    <!-- Planet -->
+    <circle cx="0" cy="0" r="78" fill="#161b22" stroke="#58a6ff" stroke-width="8"/>
+    <circle cx="-26" cy="-22" r="14" fill="#58a6ff" fill-opacity="0.25"/>
+    <circle cx="22" cy="18" r="20" fill="#58a6ff" fill-opacity="0.18"/>
+    <!-- Satellite riding the orbit -->
+    <g transform="rotate(-24) translate(168 0)">
+      <rect x="-16" y="-16" width="32" height="32" rx="7" fill="#58a6ff"/>
+      <rect x="-44" y="-9" width="22" height="18" rx="3" fill="#58a6ff" fill-opacity="0.7"/>
+      <rect x="22" y="-9" width="22" height="18" rx="3" fill="#58a6ff" fill-opacity="0.7"/>
+    </g>
+  </g>
+</svg>
