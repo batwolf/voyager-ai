@@ -13,6 +13,10 @@ session transcript.
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![status](https://img.shields.io/badge/status-v1-orange)
 
+<br />
+
+![Voyager AI dashboard — sidebar of sessions, a live claude terminal, and a status panel](docs/screenshot.png)
+
 </div>
 
 ---
