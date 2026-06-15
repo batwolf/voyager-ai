@@ -1,0 +1,17 @@
+{
+  "name": "voyager-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Voyager AI — local dashboard for running and managing multiple Claude Code sessions",
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm --prefix server run dev",
+    "dev:web": "npm --prefix web run dev",
+    "install:all": "npm install && npm --prefix server install && npm --prefix web install",
+    "build": "npm --prefix web run build",
+    "start": "npm run dev"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
