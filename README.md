@@ -65,16 +65,38 @@ git clone https://github.com/<you>/voyager-ai.git
 cd voyager-ai
 
 npm run install:all   # installs root, server, and web deps
-npm run dev           # starts server (:8787) + web (:5173)
+npm run dev           # starts server (:8990) + web (:8991)
 ```
 
-Then open **http://localhost:5173**.
+Then open **http://localhost:8991**.
 
 For a single-process production run:
 
 ```bash
 npm run build                 # builds the web app into web/dist
-npm --prefix server run start # server serves the built UI on :8787
+npm --prefix server run start # server serves the built UI on :8990
+```
+
+## Run as a standalone app window (optional)
+
+Voyager is an installable PWA, so you can run it in its own pinned window instead
+of a browser tab. A separate window also keeps Claude's login / "get tokens" URL
+from ever covering the terminal — it opens in your normal browser instead.
+
+**Install it (recommended).** Use the single-process build above, open
+**http://localhost:8990**, then in Chrome click the **install icon** in the
+address bar (or ⋮ → _Cast, save, and share_ → _Install page as app…_). It opens
+in its own window and can be pinned to the Dock/taskbar. (Installability needs
+the service worker, which is only registered in the production build — not the
+`:8991` dev server.)
+
+**No install — just a window.** Launch Chrome straight into an app window:
+
+```bash
+# macOS
+open -na "Google Chrome" --args --app=http://localhost:8990
+# Linux
+google-chrome --app=http://localhost:8990
 ```
 
 ## Usage
@@ -110,7 +132,7 @@ Non-git directories (or unchecking the box) run the session directly in place.
 
 | Env var               | Default  | Purpose                                                                                     |
 | --------------------- | -------- | ------------------------------------------------------------------------------------------- |
-| `MC_PORT`             | `8787`   | Server port                                                                                  |
+| `MC_PORT`             | `8990`   | Server port                                                                                  |
 | `MC_CLAUDE_BIN`       | `claude` | Path to the claude binary                                                                    |
 | `MC_DATA_DIR`         | `~/.mc`  | Session registry + pipe logs                                                                 |
 | `MC_SKIP_PERMISSIONS` | `1` (on) | Launch sessions with `--dangerously-skip-permissions`; set `0` to require manual approvals   |

@@ -2,7 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
-import { CLAUDE_BIN, PIPE_DIR, SKIP_PERMISSIONS, WORKTREE_DIR } from "./config.js";
+import { CLAUDE_BIN, PIPE_DIR, SHIM_DIR, SKIP_PERMISSIONS, WORKTREE_DIR } from "./config.js";
+import { ensureBrowserShim } from "./browser-shim.js";
 import { findTranscript } from "./paths.js";
 import {
   addWorktree,
@@ -56,8 +57,13 @@ const STRIP_ENV = [
 function claudeCommand(sessionId: string, name: string, resume: boolean): string {
   const flag = resume ? `--resume ${sessionId}` : `--session-id ${sessionId}`;
   const envPrefix = `env ${STRIP_ENV.map((v) => `-u ${v}`).join(" ")}`;
+  // On macOS, prepend our shim dir so Claude's login flow can't hijack the
+  // browser tab showing this terminal — the auth URL is printed (and clickable)
+  // instead. `$PATH` is expanded by the shell tmux runs the command through.
+  const pathPrefix =
+    process.platform === "darwin" ? `PATH=${shellQuote(`${SHIM_DIR}:`)}"$PATH" ` : "";
   const perms = SKIP_PERMISSIONS ? " --dangerously-skip-permissions" : "";
-  return `${envPrefix} ${CLAUDE_BIN} ${flag} -n ${shellQuote(name)}${perms}`;
+  return `${envPrefix} ${pathPrefix}${CLAUDE_BIN} ${flag} -n ${shellQuote(name)}${perms}`;
 }
 
 interface LiveSession {
@@ -105,6 +111,7 @@ export class SessionManager extends EventEmitter {
 
   async init(): Promise<void> {
     ensureDataDirs();
+    ensureBrowserShim();
     const persisted = loadSessions();
     const owned = new Set(await listOwnedSessions());
     for (const meta of persisted) {
