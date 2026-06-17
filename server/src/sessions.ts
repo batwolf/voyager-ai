@@ -2,9 +2,15 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
-import { CLAUDE_BIN, PIPE_DIR, SHIM_DIR, SKIP_PERMISSIONS, WORKTREE_DIR } from "./config.js";
+import { PIPE_DIR, WORKTREE_DIR } from "./config.js";
 import { ensureBrowserShim } from "./browser-shim.js";
-import { findTranscript } from "./paths.js";
+import { findSessionTranscript } from "./paths.js";
+import {
+  buildLaunchCommand,
+  discoverGrokSessionId,
+  normalizeProvider,
+  tuiReady,
+} from "./providers.js";
 import {
   addWorktree,
   gitInfo,
@@ -27,44 +33,13 @@ import {
   sessionExists,
 } from "./tmux.js";
 import type {
+  AgentProvider,
   SessionDTO,
   SessionMeta,
   SessionRuntime,
   SessionStatus,
   TokenUsage,
 } from "./types.js";
-
-function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
-/**
- * Claude env vars that, when inherited, make a spawned session believe it is a
- * nested child agent — which suppresses normal transcript persistence. Missions
- * Control runs each session as a clean top-level session, so we strip them.
- */
-const STRIP_ENV = [
-  "CLAUDECODE",
-  "CLAUDE_CODE_SESSION_ID",
-  "CLAUDE_CODE_CHILD_SESSION",
-  "CLAUDE_CODE_ENTRYPOINT",
-  "CLAUDE_CODE_EXECPATH",
-  "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
-  "CLAUDE_EFFORT",
-  "AI_AGENT",
-];
-
-function claudeCommand(sessionId: string, name: string, resume: boolean): string {
-  const flag = resume ? `--resume ${sessionId}` : `--session-id ${sessionId}`;
-  const envPrefix = `env ${STRIP_ENV.map((v) => `-u ${v}`).join(" ")}`;
-  // On macOS, prepend our shim dir so Claude's login flow can't hijack the
-  // browser tab showing this terminal — the auth URL is printed (and clickable)
-  // instead. `$PATH` is expanded by the shell tmux runs the command through.
-  const pathPrefix =
-    process.platform === "darwin" ? `PATH=${shellQuote(`${SHIM_DIR}:`)}"$PATH" ` : "";
-  const perms = SKIP_PERMISSIONS ? " --dangerously-skip-permissions" : "";
-  return `${envPrefix} ${pathPrefix}${CLAUDE_BIN} ${flag} -n ${shellQuote(name)}${perms}`;
-}
 
 interface LiveSession {
   meta: SessionMeta;
@@ -73,7 +48,6 @@ interface LiveSession {
   lastOutputMs: number;
   status: SessionStatus;
   capture: string;
-  // binary tail bookkeeping for the pipe file
   pipeOffset: number;
   pipeWatcher: fs.FSWatcher | null;
 }
@@ -82,10 +56,11 @@ export interface CreateOpts {
   cwd: string;
   name?: string;
   prompt?: string;
+  provider?: AgentProvider;
   cols?: number;
   rows?: number;
-  isolate?: boolean; // run in a fresh git worktree
-  baseBranch?: string; // branch to fork the worktree from
+  isolate?: boolean;
+  baseBranch?: string;
 }
 
 /** Raised when removing a worktree-backed session that has uncommitted work. */
@@ -96,14 +71,13 @@ export class DirtyWorktreeError extends Error {
   }
 }
 
+function normalizeMeta(meta: SessionMeta): SessionMeta {
+  return { ...meta, provider: normalizeProvider(meta.provider) };
+}
+
 /**
- * Owns the full lifecycle of tmux-backed claude sessions: spawning, raw I/O
+ * Owns the full lifecycle of tmux-backed agent sessions: spawning, raw I/O
  * mirroring, transcript-derived runtime state, and status polling.
- *
- * Events:
- *   "output"  (id, Buffer)  raw pane bytes for the terminal
- *   "status"  (id)          runtime/status changed -> rebroadcast DTO
- *   "sessions"()            registry membership changed
  */
 export class SessionManager extends EventEmitter {
   private sessions = new Map<string, LiveSession>();
@@ -112,10 +86,9 @@ export class SessionManager extends EventEmitter {
   async init(): Promise<void> {
     ensureDataDirs();
     ensureBrowserShim();
-    const persisted = loadSessions();
+    const persisted = loadSessions().map(normalizeMeta);
     const owned = new Set(await listOwnedSessions());
     for (const meta of persisted) {
-      // Only re-adopt sessions whose tmux session still exists.
       if (owned.has(meta.id)) this.adopt(meta);
     }
     this.poller = setInterval(() => void this.poll(), 1000);
@@ -125,10 +98,18 @@ export class SessionManager extends EventEmitter {
     saveSessions([...this.sessions.values()].map((s) => s.meta));
   }
 
-  /** Wire up a LiveSession around existing meta (used by create + adopt). */
   private register(meta: SessionMeta): LiveSession {
     const pipeFile = path.join(PIPE_DIR, `${meta.id}.out`);
-    const transcript = new TranscriptWatcher(meta.cwd, meta.sessionId);
+    const transcript = new TranscriptWatcher(
+      meta.provider,
+      meta.cwd,
+      meta.sessionId,
+      meta.createdAt,
+      (sessionId) => {
+        meta.sessionId = sessionId;
+        this.persist();
+      }
+    );
     const live: LiveSession = {
       meta,
       transcript,
@@ -147,12 +128,10 @@ export class SessionManager extends EventEmitter {
 
   private adopt(meta: SessionMeta): void {
     const live = this.register(meta);
-    // Resume mirroring this pane's output into a fresh file.
     void this.startPipe(live);
   }
 
   private async startPipe(live: LiveSession): Promise<void> {
-    // Truncate any stale pipe file and (re)start the tail.
     try {
       fs.writeFileSync(live.pipeFile, "");
     } catch {
@@ -197,10 +176,12 @@ export class SessionManager extends EventEmitter {
     if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
       throw new Error(`Not a directory: ${cwd}`);
     }
-    const sessionId = crypto.randomUUID();
+
+    const provider = normalizeProvider(opts.provider);
+    const id = crypto.randomUUID();
+    const sessionId = provider === "claude" ? id : "";
     const name = opts.name?.trim() || path.basename(cwd);
 
-    // Optionally isolate the session in a fresh git worktree.
     let runDir = cwd;
     let worktree: SessionMeta["worktree"];
     if (opts.isolate) {
@@ -208,12 +189,12 @@ export class SessionManager extends EventEmitter {
       if (!info.isRepo || !info.repoRoot) {
         throw new Error("Cannot isolate: the selected directory is not a git repository.");
       }
-      const worktreePath = path.join(WORKTREE_DIR, sessionId);
+      const worktreePath = path.join(WORKTREE_DIR, id);
       const wt = await addWorktree({
         repoRoot: info.repoRoot,
         worktreePath,
         name,
-        shortId: sessionId.slice(0, 8),
+        shortId: id.slice(0, 8),
         base: opts.baseBranch || info.currentBranch,
       });
       runDir = wt.path;
@@ -221,21 +202,27 @@ export class SessionManager extends EventEmitter {
     }
 
     const meta: SessionMeta = {
-      id: sessionId,
+      id,
       sessionId,
+      provider,
       name,
       cwd: runDir,
       sourceCwd: cwd,
       createdAt: Date.now(),
       initialPrompt: opts.prompt,
-      transcriptPath: "", // resolved lazily once claude writes it
+      transcriptPath: "",
       worktree,
     };
 
     await newSession({
       id: meta.id,
       cwd: runDir,
-      command: claudeCommand(sessionId, name, false),
+      command: buildLaunchCommand(provider, {
+        sessionId,
+        name,
+        resume: false,
+        prompt: provider === "grok" ? opts.prompt : undefined,
+      }),
       cols: opts.cols,
       rows: opts.rows,
     });
@@ -245,18 +232,19 @@ export class SessionManager extends EventEmitter {
     this.persist();
     this.emit("sessions");
 
-    if (opts.prompt?.trim()) {
+    if (opts.prompt?.trim() && provider === "claude") {
       void this.sendInitialPrompt(meta.id, opts.prompt.trim());
     }
     return this.toDTO(meta.id)!;
   }
 
-  /** Wait for the claude TUI to settle, then type the initial prompt. */
   private async sendInitialPrompt(id: string, prompt: string): Promise<void> {
+    const live = this.sessions.get(id);
+    if (!live) return;
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, 300));
       const cap = await capturePane(id);
-      if (cap.includes("│") || /claude/i.test(cap)) break; // prompt box drawn
+      if (tuiReady(cap, live.meta.provider)) break;
     }
     await sendRaw(id, prompt);
     await new Promise((r) => setTimeout(r, 150));
@@ -273,17 +261,10 @@ export class SessionManager extends EventEmitter {
     await resizeWindow(id, cols, rows);
   }
 
-  /** Snapshot the visible screen (plain text) — used for status heuristics. */
   async snapshot(id: string): Promise<string> {
     return capturePane(id);
   }
 
-  /**
-   * Resize the pane to the client's dimensions and force the TUI to fully
-   * redraw. Nudging the height (rows-1 then rows) guarantees a SIGWINCH even
-   * when the size is unchanged, so claude re-emits a clean screen through
-   * pipe-pane instead of us dumping a lossy text snapshot.
-   */
   async repaint(id: string, cols: number, rows: number): Promise<void> {
     if (!this.sessions.has(id) || !cols || !rows) return;
     await resizeWindow(id, cols, Math.max(2, rows - 1));
@@ -291,7 +272,6 @@ export class SessionManager extends EventEmitter {
     await resizeWindow(id, cols, rows);
   }
 
-  /** Terminate the tmux session but keep metadata so it can be resumed. */
   async stop(id: string): Promise<void> {
     const live = this.sessions.get(id);
     if (!live) return;
@@ -302,11 +282,6 @@ export class SessionManager extends EventEmitter {
     this.emit("status", id);
   }
 
-  /**
-   * Permanently remove a session (kills tmux, drops metadata + pipe). For
-   * worktree-backed sessions the worktree is removed but its branch is kept;
-   * throws {@link DirtyWorktreeError} if it has uncommitted changes and !force.
-   */
   async remove(id: string, force = false): Promise<void> {
     const live = this.sessions.get(id);
     if (!live) return;
@@ -337,7 +312,6 @@ export class SessionManager extends EventEmitter {
     this.emit("sessions");
   }
 
-  /** Prepare a merge request from this session's branch into a base branch. */
   async mergeRequest(
     id: string,
     opts: { base?: string; title?: string; body?: string } = {}
@@ -353,19 +327,29 @@ export class SessionManager extends EventEmitter {
     });
   }
 
-  /** Resume a stopped session (or restart a running one) via --resume. */
   async restart(id: string): Promise<SessionDTO | null> {
     const live = this.sessions.get(id);
     if (!live) return null;
+
+    if (live.meta.provider === "grok" && !live.meta.sessionId) {
+      const discovered = discoverGrokSessionId(live.meta.cwd, live.meta.createdAt);
+      if (discovered) live.meta.sessionId = discovered;
+    }
+
     await killSession(id);
     live.pipeWatcher?.close();
     await newSession({
       id: live.meta.id,
       cwd: live.meta.cwd,
-      command: claudeCommand(live.meta.sessionId, live.meta.name, true),
+      command: buildLaunchCommand(live.meta.provider, {
+        sessionId: live.meta.sessionId,
+        name: live.meta.name,
+        resume: true,
+      }),
     });
     live.status = "starting";
     await this.startPipe(live);
+    this.persist();
     this.emit("status", id);
     return this.toDTO(id);
   }
@@ -380,11 +364,21 @@ export class SessionManager extends EventEmitter {
         }
         continue;
       }
-      // Resolve transcript path opportunistically for the DTO.
-      if (!live.meta.transcriptPath) {
-        const p = findTranscript(live.meta.cwd, live.meta.sessionId);
+
+      if (live.meta.provider === "grok" && !live.meta.sessionId) {
+        const discovered = discoverGrokSessionId(live.meta.cwd, live.meta.createdAt);
+        if (discovered) {
+          live.meta.sessionId = discovered;
+          live.transcript.setSessionId(discovered);
+          this.persist();
+        }
+      }
+
+      if (!live.meta.transcriptPath && live.meta.sessionId) {
+        const p = findSessionTranscript(live.meta.provider, live.meta.cwd, live.meta.sessionId);
         if (p) live.meta.transcriptPath = p;
       }
+
       const capture = await capturePane(live.meta.id);
       live.capture = capture;
       const next = deriveStatus({

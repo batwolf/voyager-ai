@@ -1,3 +1,5 @@
+export type AgentProvider = "claude" | "grok";
+
 export type SessionStatus =
   | "starting"
   | "running"
@@ -43,7 +45,8 @@ export interface WorktreeInfo {
 /** Persisted, identity-level metadata for a session. */
 export interface SessionMeta {
   id: string; // short id used for tmux session name + UI key
-  sessionId: string; // claude --session-id uuid
+  sessionId: string; // agent session id (claude --session-id; grok id after discovery)
+  provider: AgentProvider;
   name: string;
   cwd: string; // directory claude actually runs in (worktree path if isolated)
   sourceCwd: string; // directory the user originally picked

@@ -1,4 +1,4 @@
-import type { BrowseResult, GitInfo, MergeRequestResult, SessionDTO } from "./types";
+import type { AgentProvider, BrowseResult, GitInfo, MergeRequestResult, SessionDTO } from "./types";
 
 async function jsonOrThrow(res: Response) {
   if (!res.ok) {
@@ -11,8 +11,11 @@ async function jsonOrThrow(res: Response) {
 export const api = {
   listSessions: (): Promise<SessionDTO[]> => fetch("/api/sessions").then(jsonOrThrow),
 
+  providers: (): Promise<AgentProvider[]> => fetch("/api/providers").then(jsonOrThrow),
+
   createSession: (body: {
     cwd: string;
+    provider?: AgentProvider;
     name?: string;
     prompt?: string;
     cols?: number;

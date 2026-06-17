@@ -1,3 +1,5 @@
+export type AgentProvider = "claude" | "grok";
+
 export type SessionStatus =
   | "starting"
   | "running"
@@ -41,6 +43,7 @@ export interface WorktreeInfo {
 export interface SessionDTO {
   id: string;
   sessionId: string;
+  provider: AgentProvider;
   name: string;
   cwd: string;
   sourceCwd: string;
