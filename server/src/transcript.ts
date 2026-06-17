@@ -1,7 +1,9 @@
 import fs from "node:fs";
+import path from "node:path";
 import { EventEmitter } from "node:events";
-import { findTranscript } from "./paths.js";
-import type { TodoItem, TokenUsage } from "./types.js";
+import { findSessionTranscript } from "./paths.js";
+import { discoverGrokSessionId } from "./providers.js";
+import type { AgentProvider, TodoItem, TokenUsage } from "./types.js";
 
 export interface TranscriptState {
   model?: string;
@@ -31,8 +33,13 @@ function textFromContent(content: unknown): string | undefined {
   return undefined;
 }
 
+function grokTextFromContent(content: unknown): string | undefined {
+  if (typeof content === "string") return content;
+  return textFromContent(content);
+}
+
 /**
- * Tails a session's JSONL transcript, incrementally parsing appended lines
+ * Tails a session's transcript, incrementally parsing appended lines
  * into a structured {@link TranscriptState}. Emits "update" on every change.
  */
 export class TranscriptWatcher extends EventEmitter {
@@ -45,30 +52,74 @@ export class TranscriptWatcher extends EventEmitter {
   };
 
   private path: string | null = null;
+  private updatesPath: string | null = null;
   private offset = 0;
+  private updatesOffset = 0;
   private remainder = "";
+  private updatesRemainder = "";
   private watcher: fs.FSWatcher | null = null;
+  private updatesWatcher: fs.FSWatcher | null = null;
   private resolveTimer: NodeJS.Timeout | null = null;
+  private sessionId: string;
 
-  constructor(private readonly cwd: string, private readonly sessionId: string) {
+  constructor(
+    private readonly provider: AgentProvider,
+    private readonly cwd: string,
+    sessionId: string,
+    private readonly createdAt: number,
+    private onSessionId?: (id: string) => void
+  ) {
     super();
+    this.sessionId = sessionId;
   }
 
   start(): void {
     this.tryResolve();
   }
 
+  setSessionId(id: string): void {
+    if (this.sessionId === id) return;
+    this.sessionId = id;
+    this.path = null;
+    this.updatesPath = null;
+    this.offset = 0;
+    this.updatesOffset = 0;
+    this.remainder = "";
+    this.updatesRemainder = "";
+    this.watcher?.close();
+    this.updatesWatcher?.close();
+    this.watcher = null;
+    this.updatesWatcher = null;
+    this.tryResolve();
+  }
+
   private tryResolve(): void {
-    const p = findTranscript(this.cwd, this.sessionId);
+    if (this.provider === "grok" && !this.sessionId) {
+      const discovered = discoverGrokSessionId(this.cwd, this.createdAt);
+      if (discovered) {
+        this.sessionId = discovered;
+        this.onSessionId?.(discovered);
+      } else {
+        this.resolveTimer = setTimeout(() => this.tryResolve(), 750);
+        return;
+      }
+    }
+
+    const p = findSessionTranscript(this.provider, this.cwd, this.sessionId);
     if (p) {
       this.path = p;
       this.state.found = true;
       this.attach();
       this.readAppended();
-    } else {
-      // Transcript not written yet; poll until it appears.
-      this.resolveTimer = setTimeout(() => this.tryResolve(), 750);
+      if (this.provider === "grok") {
+        this.updatesPath = path.join(path.dirname(p), "updates.jsonl");
+        this.attachUpdates();
+        this.readUpdatesAppended();
+      }
+      return;
     }
+
+    this.resolveTimer = setTimeout(() => this.tryResolve(), 750);
   }
 
   private attach(): void {
@@ -77,6 +128,15 @@ export class TranscriptWatcher extends EventEmitter {
       this.watcher = fs.watch(this.path, () => this.readAppended());
     } catch {
       /* fall back to read-on-demand */
+    }
+  }
+
+  private attachUpdates(): void {
+    if (!this.updatesPath) return;
+    try {
+      this.updatesWatcher = fs.watch(this.updatesPath, () => this.readUpdatesAppended());
+    } catch {
+      /* ignore */
     }
   }
 
@@ -89,7 +149,6 @@ export class TranscriptWatcher extends EventEmitter {
       return;
     }
     if (stat.size < this.offset) {
-      // file truncated/rotated — restart
       this.offset = 0;
       this.remainder = "";
     }
@@ -120,7 +179,51 @@ export class TranscriptWatcher extends EventEmitter {
     if (changed) this.emit("update", this.state);
   }
 
+  private readUpdatesAppended(): void {
+    if (!this.updatesPath) return;
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(this.updatesPath);
+    } catch {
+      return;
+    }
+    if (stat.size < this.updatesOffset) {
+      this.updatesOffset = 0;
+      this.updatesRemainder = "";
+    }
+    if (stat.size === this.updatesOffset) return;
+
+    const fd = fs.openSync(this.updatesPath, "r");
+    try {
+      const len = stat.size - this.updatesOffset;
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, this.updatesOffset);
+      this.updatesOffset = stat.size;
+      this.updatesRemainder += buf.toString("utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    const lines = this.updatesRemainder.split("\n");
+    this.updatesRemainder = lines.pop() ?? "";
+    let changed = false;
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        if (this.ingestGrokUpdate(JSON.parse(line))) changed = true;
+      } catch {
+        /* skip */
+      }
+    }
+    if (changed) this.emit("update", this.state);
+  }
+
   private ingest(entry: any): boolean {
+    if (this.provider === "grok") return this.ingestGrokChat(entry);
+    return this.ingestClaude(entry);
+  }
+
+  private ingestClaude(entry: any): boolean {
     const type = entry?.type as string | undefined;
     if (!type) return false;
     this.state.lastEntryType = type;
@@ -135,20 +238,14 @@ export class TranscriptWatcher extends EventEmitter {
       const msg = entry.message;
       this.state.messageCount++;
       if (msg.model) this.state.model = msg.model;
-      this.applyUsage(msg.usage);
+      this.applyClaudeUsage(msg.usage);
       const text = textFromContent(msg.content);
       if (text) this.state.lastMessage = text.slice(0, 2000);
       if (Array.isArray(msg.content)) {
         for (const block of msg.content) {
           if (block?.type === "tool_use") {
             this.state.toolCallCount++;
-            if (block.name === "TodoWrite" && Array.isArray(block.input?.todos)) {
-              this.state.todos = block.input.todos.map((t: any) => ({
-                content: String(t.content ?? ""),
-                status: t.status ?? "pending",
-                activeForm: t.activeForm,
-              }));
-            }
+            this.applyTodoTool(block.name, block.input);
           }
         }
       }
@@ -157,13 +254,72 @@ export class TranscriptWatcher extends EventEmitter {
       const text = textFromContent(entry.message.content);
       if (text) this.state.lastMessage = text.slice(0, 2000);
     } else {
-      changed = false; // bookkeeping entries don't change derived state
+      changed = false;
       if (this.state.lastActivity) changed = true;
     }
     return changed;
   }
 
-  private applyUsage(usage: any): void {
+  private ingestGrokChat(entry: any): boolean {
+    const type = entry?.type as string | undefined;
+    if (!type || type === "system" || type === "reasoning" || type === "tool_result") {
+      return false;
+    }
+    this.state.lastEntryType = type;
+    let changed = true;
+
+    if (type === "assistant") {
+      this.state.messageCount++;
+      if (entry.model_id) this.state.model = entry.model_id;
+      const text = grokTextFromContent(entry.content);
+      if (text) this.state.lastMessage = text.slice(0, 2000);
+      if (Array.isArray(entry.tool_calls)) {
+        for (const call of entry.tool_calls) {
+          this.state.toolCallCount++;
+          this.applyTodoTool(call.name, call.arguments);
+        }
+      }
+    } else if (type === "user") {
+      this.state.messageCount++;
+      const text = grokTextFromContent(entry.content);
+      if (text) this.state.lastMessage = text.slice(0, 2000);
+    } else {
+      changed = false;
+    }
+    return changed;
+  }
+
+  private ingestGrokUpdate(entry: any): boolean {
+    const total = entry?.params?._meta?.totalTokens;
+    if (typeof total !== "number" || total <= this.state.usage.total) return false;
+    this.state.usage.total = total;
+    this.state.usage.input = total;
+    this.state.lastActivity = Date.now();
+    const model = entry?.params?.update?.content?._meta?.modelId;
+    if (typeof model === "string") this.state.model = model;
+    return true;
+  }
+
+  private applyTodoTool(name: string | undefined, input: unknown): void {
+    if (!name) return;
+    const raw = typeof input === "string" ? tryParseJson(input) : input;
+    if (name === "TodoWrite" && raw && Array.isArray((raw as any).todos)) {
+      this.state.todos = (raw as any).todos.map((t: any) => ({
+        content: String(t.content ?? ""),
+        status: t.status ?? "pending",
+        activeForm: t.activeForm,
+      }));
+    }
+    if (name === "update_goal" && raw && Array.isArray((raw as any).todos)) {
+      this.state.todos = (raw as any).todos.map((t: any) => ({
+        content: String(t.content ?? t.id ?? ""),
+        status: t.status ?? "pending",
+        activeForm: t.activeForm,
+      }));
+    }
+  }
+
+  private applyClaudeUsage(usage: any): void {
     if (!usage) return;
     const u = this.state.usage;
     u.input += usage.input_tokens ?? 0;
@@ -176,6 +332,16 @@ export class TranscriptWatcher extends EventEmitter {
   stop(): void {
     if (this.resolveTimer) clearTimeout(this.resolveTimer);
     this.watcher?.close();
+    this.updatesWatcher?.close();
     this.watcher = null;
+    this.updatesWatcher = null;
+  }
+}
+
+function tryParseJson(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return undefined;
   }
 }

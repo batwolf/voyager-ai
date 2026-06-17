@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -10,6 +10,13 @@ export interface TerminalSink {
   reset: () => void;
 }
 
+export interface TerminalHandle {
+  clear: () => void;
+  copySelection: () => void;
+  increaseFont: () => void;
+  decreaseFont: () => void;
+}
+
 interface Props {
   id: string;
   socket: MCSocket;
@@ -19,27 +26,70 @@ interface Props {
 
 const encoder = new TextEncoder();
 
-export function SessionTerminal({ id, socket, registerSink, unregisterSink }: Props) {
+function terminalTheme() {
+  const light = document.documentElement.dataset.theme === "light";
+  return light
+    ? {
+        background: "#fafbfc",
+        foreground: "#1a2332",
+        cursor: "#2563eb",
+        selectionBackground: "rgba(37, 99, 235, 0.2)",
+      }
+    : {
+        background: "#000000",
+        foreground: "#e8edf4",
+        cursor: "#4d9fff",
+        selectionBackground: "rgba(77, 159, 255, 0.25)",
+      };
+}
+
+export const SessionTerminal = forwardRef<TerminalHandle, Props>(function SessionTerminal(
+  { id, socket, registerSink, unregisterSink },
+  ref
+) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const fontSizeRef = useRef(13);
+
+  useImperativeHandle(ref, () => ({
+    clear: () => termRef.current?.clear(),
+    copySelection: () => {
+      const sel = termRef.current?.getSelection();
+      if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+    },
+    increaseFont: () => {
+      if (!termRef.current) return;
+      fontSizeRef.current = Math.min(20, fontSizeRef.current + 1);
+      termRef.current.options.fontSize = fontSizeRef.current;
+      fitRef.current?.fit();
+    },
+    decreaseFont: () => {
+      if (!termRef.current) return;
+      fontSizeRef.current = Math.max(9, fontSizeRef.current - 1);
+      termRef.current.options.fontSize = fontSizeRef.current;
+      fitRef.current?.fit();
+    },
+  }));
 
   useEffect(() => {
     const term = new Terminal({
       fontFamily: "Menlo, Monaco, 'Courier New', monospace",
-      fontSize: 12,
+      fontSize: fontSizeRef.current,
       cursorBlink: true,
       scrollback: 5000,
-      theme: { background: "#000000", foreground: "#e6edf3" },
+      theme: terminalTheme(),
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    // Make URLs (e.g. Claude's login/"get tokens" link) clickable, opening in a
-    // new tab so they never replace the terminal view.
     term.loadAddon(
       new WebLinksAddon((_event, uri) => {
         window.open(uri, "_blank", "noopener,noreferrer");
       })
     );
     term.open(hostRef.current!);
+    termRef.current = term;
+    fitRef.current = fit;
 
     const dims = () => ({ cols: term.cols, rows: term.rows });
 
@@ -49,8 +99,6 @@ export function SessionTerminal({ id, socket, registerSink, unregisterSink }: Pr
       reset: () => term.reset(),
     });
 
-    // Fit only once layout has settled, then attach (the server resizes the
-    // pane to these dims and forces a clean redraw).
     const raf = requestAnimationFrame(() => {
       try {
         fit.fit();
@@ -68,22 +116,37 @@ export function SessionTerminal({ id, socket, registerSink, unregisterSink }: Pr
         const { cols, rows } = dims();
         if (cols > 2 && rows > 2) socket.resize(id, cols, rows);
       } catch {
-        /* ignore transient resize errors */
+        /* ignore */
       }
     });
     ro.observe(hostRef.current!);
+
+    const themeObserver = new MutationObserver(() => {
+      term.options.theme = terminalTheme();
+    });
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
 
     term.focus();
 
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
+      themeObserver.disconnect();
       dataSub.dispose();
       unregisterSink(id);
       socket.detach(id);
       term.dispose();
+      termRef.current = null;
+      fitRef.current = null;
     };
   }, [id, socket, registerSink, unregisterSink]);
 
-  return <div className="terminal-host" ref={hostRef} />;
-}
+  return (
+    <div className="terminal-frame">
+      <div className="terminal-host" ref={hostRef} />
+    </div>
+  );
+});

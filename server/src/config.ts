@@ -6,6 +6,9 @@ export const PORT = Number(process.env.MC_PORT ?? 8990);
 /** Where claude writes per-project transcripts. */
 export const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
 
+/** Where grok stores per-project session directories. */
+export const GROK_SESSIONS_DIR = path.join(os.homedir(), ".grok", "sessions");
+
 /** Local app data (persisted session registry, pipe-pane logs). */
 export const DATA_DIR = process.env.MC_DATA_DIR ?? path.join(os.homedir(), ".mc");
 export const SESSIONS_FILE = path.join(DATA_DIR, "sessions.json");
@@ -17,6 +20,9 @@ export const SHIM_DIR = path.join(DATA_DIR, "shims");
 
 /** Path to the claude binary. Override with MC_CLAUDE_BIN if not on PATH. */
 export const CLAUDE_BIN = process.env.MC_CLAUDE_BIN ?? "claude";
+
+/** Path to the grok binary. Override with MC_GROK_BIN if not on PATH. */
+export const GROK_BIN = process.env.MC_GROK_BIN ?? "grok";
 
 /**
  * Launch sessions with --dangerously-skip-permissions so they run unattended

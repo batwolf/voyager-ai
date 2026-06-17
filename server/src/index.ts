@@ -6,6 +6,7 @@ import express from "express";
 import cors from "cors";
 import { WebSocketServer, WebSocket } from "ws";
 import { PORT } from "./config.js";
+import { availableProviders } from "./providers.js";
 import { SessionManager, DirtyWorktreeError } from "./sessions.js";
 import { hasTmux } from "./tmux.js";
 import { browse, recentProjects } from "./browse.js";
@@ -28,15 +29,26 @@ async function main() {
 
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
+  app.get("/api/providers", (_req, res) => res.json(availableProviders()));
+
   app.get("/api/sessions", (_req, res) => res.json(manager.list()));
 
   app.post("/api/sessions", async (req, res) => {
     try {
-      const { cwd, name, prompt, cols, rows, isolate, baseBranch } = req.body ?? {};
+      const { cwd, name, prompt, provider, cols, rows, isolate, baseBranch } = req.body ?? {};
       if (!cwd || typeof cwd !== "string") {
         return res.status(400).json({ error: "cwd is required" });
       }
-      const dto = await manager.create({ cwd, name, prompt, cols, rows, isolate, baseBranch });
+      const dto = await manager.create({
+        cwd,
+        name,
+        prompt,
+        provider,
+        cols,
+        rows,
+        isolate,
+        baseBranch,
+      });
       res.status(201).json(dto);
     } catch (err: any) {
       res.status(400).json({ error: String(err?.message ?? err) });

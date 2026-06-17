@@ -1,6 +1,12 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { getInitialTheme } from "./hooks/useTheme";
+import "@fontsource/inter/400.css";
+
+document.documentElement.dataset.theme = getInitialTheme();
+import "@fontsource/inter/500.css";
+import "@fontsource/inter/600.css";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
@@ -20,4 +26,3 @@ if (import.meta.env.PROD && "serviceWorker" in navigator) {
     });
   });
 }
-
